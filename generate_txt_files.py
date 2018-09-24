@@ -1,7 +1,13 @@
-"""
+'''
+PV-20 #Create preprocessing sound clips 
 Helper script to transform the Voxforge annotations into separate text files,
 one for each example audio file.
-"""
+
+Used With California Polythechnic University California, Pomona Voice Assitant Project
+Author: Jason Chang
+Project Manager: Gerry Fernando Patia
+Date: 8 July, 2018
+'''
 
 import os
 

@@ -14,6 +14,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 import os
+import random
 
 # Constants
 SPACE_TOKEN = '<space>'
@@ -22,8 +23,14 @@ FIRST_INDEX = ord('a') - 1  # 0 is reserved to space
 
 checkpoint_steps = 10
 
-if not os.path.isdir('./checkpoints'):
-	os.makedirs('./checkpoints')
+if not os.path.isdir('./VAcheckpoints'):
+	os.makedirs('./VAcheckpoints')
+
+if not os.path.isdir('./VAsummaries/train'):
+	os.makedirs('./VAsummaries/train')
+
+if not os.path.isdir('./VAsummaries/test'):
+	os.makedirs('./VAsummaries/test')
 
 # Number of input features
 num_features = 26
@@ -39,11 +46,11 @@ learning_rate = 0.01
 momentum = 0.9
 
 # Load the data from pickle files
-with open('train_data_batched_Aaron_small.pkl', 'rb') as f:
+with open('./data/train_data_batched_Aaron_small.pkl', 'rb') as f:
 	batched_data = pickle.load(f)
 
 # Load original text targets
-with open('original_targets_batched_Aaron_small.pkl', 'rb') as f:
+with open('./data/original_targets_batched_Aaron_small.pkl', 'rb') as f:
 	original_targets = pickle.load(f)
 
 #batched_data = [[batch_size, batch_features/max_length, 26], batch_targets, batch_seq_len]
@@ -64,16 +71,22 @@ del batched_data
 ###Creating placeholders####
 
 # Has size [batch_size, max_stepsize, num_features], but the batch_size and max_stepsize can vary along each step
-inputs = tf.placeholder(tf.float32, [None, None, num_features])
+inputs = tf.placeholder(tf.float32, [None, None, num_features], name = 'inputs')
+tf.summary.audio('audio', inputs, sample_rate=16000, max_outputs=3)
 # Here we use sparse_placeholder that will generate a SparseTensor required by ctc_loss op.
-targets = tf.sparse_placeholder(tf.int32)
+targets = tf.sparse_placeholder(tf.int32, name = 'targets')
 # 1d array of size [batch_size]
-seq_len = tf.placeholder(tf.int32, [None])
+seq_len = tf.placeholder(tf.int32, [None], name = 'seq_len')
 
 def test_decoding(sess, decoded, input_feed_dict, input_original):
-	"""
+	'''
 	Runs the classifier on a feed dictionary and prints the decoded predictions.
-	"""
+	Args:
+		sess: tf.Session 
+		dedcoded: list of length top_paths, where decoded[j] is a SparseTensor containing the decoded outputs
+		input_feed_dict: decoded value in sparse value
+		input_original: original value in string
+	'''
 
 	d = sess.run(decoded, feed_dict=input_feed_dict)
 
@@ -89,7 +102,7 @@ def test_decoding(sess, decoded, input_feed_dict, input_original):
 
 
 def train_neural_network(inputs,targets, seq_len):
-	"""
+	'''
 	Trains LSTM Recurrent Neural Network using ctc loss
 	Weights are truncated_normal rather than random because truncated normal overcomes saturation of time functions like sigmoid 
 	(where if the value is too big/small [randomm], the neuron stops learning)
@@ -101,61 +114,84 @@ def train_neural_network(inputs,targets, seq_len):
 
 	Returns:
 		ckpt models, matplotlib plot
-	"""
+	'''
 
-	#Initializing the Weights and Biases
-	layer = {'weights':tf.Variable(tf.truncated_normal([num_hidden, num_classes], stddev=0.1)),
-			 'biases':tf.Variable(tf.constant(0., shape=[num_classes]))}
+	with tf.name_scope("dynamic_rnn"):
+		#Initializing the Weights and Biases
+		layer = {'weights':tf.Variable(tf.truncated_normal([num_hidden, num_classes], stddev=0.1), name = 'weights'),
+				 'biases':tf.Variable(tf.constant(0., shape=[num_classes]), name = 'biases')}
 
-	#For creating multi layered RNN cell for later 
-	cells = []
-	for _ in range(num_layers):
-		cell = tf.contrib.rnn.LSTMCell(num_hidden)
-		cells.append(cell)
-	stack = tf.contrib.rnn.MultiRNNCell(cells)
+		#For creating multi layered RNN cell for later 
+		cells = []
+		for _ in range(num_layers):
+			cell = tf.contrib.rnn.LSTMCell(num_hidden)
+			cells.append(cell)
+		stack = tf.contrib.rnn.MultiRNNCell(cells)
 
-	# The second output is the last state and we will no use that
-	outputs, _ = tf.nn.dynamic_rnn(stack, inputs, seq_len, dtype=tf.float32)
+		#The second output is the last state and we will no use that
+		outputs, _ = tf.nn.dynamic_rnn(stack, inputs, seq_len, dtype=tf.float32)
 
-	shape = tf.shape(inputs)
-	batch_s, max_timesteps = shape[0], shape[1]
+		shape = tf.shape(inputs)
+		batch_s, max_timesteps = shape[0], shape[1]
 
-	#Reshaping to apply the same weights over the timesteps
-	outputs = tf.reshape(outputs, [-1, num_hidden])
+		#Reshaping to apply the same weights over the timesteps
+		outputs = tf.reshape(outputs, [-1, num_hidden])
 
-	#Applying linear transform
-	logits = tf.matmul(outputs, layer['weights']) + layer['biases']
+		#Applying linear transform
+		logits = tf.matmul(outputs, layer['weights']) + layer['biases']
 
-	#Reshaping back to the original shape
-	logits = tf.reshape(logits, [batch_s, -1, num_classes])
+		#Reshaping back to the original shape
+		logits = tf.reshape(logits, [batch_s, -1, num_classes])
 
-	#Time major: [max_time, batch_size, num_classes]. Required for CTC loss fucntion
-	logits = tf.transpose(logits, (1, 0, 2))
+		#Time major: [max_time, batch_size, num_classes]. Required for CTC loss fucntion
+		logits = tf.transpose(logits, (1, 0, 2))
 
-	loss = tf.nn.ctc_loss(targets, logits, seq_len)
-	cost = tf.reduce_mean(loss)
+		# Record the cost
+		tf.summary.histogram("weights", layer['weights'])
+		tf.summary.histogram("biases", layer['biases'])
+		tf.summary.histogram("logits", logits)
 
-	#Slower optimization
-	#optimizer = tf.train.AdamOptimizer().minimize(cost)
-	optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=momentum, use_nesterov=True).minimize(cost)
+	with tf.name_scope("cost"):
+		loss = tf.nn.ctc_loss(targets, logits, seq_len)
+		cost = tf.reduce_mean(loss)
 
-	#Option 1: (it's slower but you'll get better results)
-	decoded, log_prob = tf.nn.ctc_beam_search_decoder(inputs=logits, sequence_length=seq_len)
-	# Option 2: 
-	#decoded, log_prob = tf.nn.ctc_greedy_decoder(logits, seq_len)
+		#Record
+		tf.summary.scalar('cost', cost)
 
-	# Inaccuracy: label error rate
-	ler = tf.reduce_mean(tf.edit_distance(tf.cast(decoded[0], tf.int32), targets))
+	with tf.name_scope("train"):
+		#Slower optimization but works better not on BiRNN
+		optimizer = tf.train.AdamOptimizer(learning_rate = learning_rate).minimize(cost)
+		#optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=momentum, use_nesterov=True).minimize(cost)
 
+	with tf.name_scope("label_error_rate"):
+		#Option 1: (it's slower but you'll get better results)
+		decoded, log_prob = tf.nn.ctc_beam_search_decoder(inputs=logits, sequence_length=seq_len)
+		# Option 2: 
+		#decoded, log_prob = tf.nn.ctc_greedy_decoder(logits, seq_len)
+
+		# Inaccuracy: label error rate
+		ler = tf.reduce_mean(tf.edit_distance(tf.cast(decoded[0], tf.int32), targets))
+
+		# Record the label error rate
+		tf.summary.scalar('label error rate', ler)
+
+	'''
+	#For matplot
 	points_train_cost = []
 	points_train_ler = []
 	points_valid_cost = []
 	points_valid_ler = []
+	'''
 
 	saver = tf.train.Saver()
+	merged = tf.summary.merge_all()
 	init = tf.global_variables_initializer()
 	with tf.Session() as sess:
 		sess.run(init)
+		train_writer = tf.summary.FileWriter('./VAsummaries/train', sess.graph)
+		test_writer = tf.summary.FileWriter('./VAsummaries/test', sess.graph)
+		train_writer.add_graph(sess.graph)
+		test_writer.add_graph(sess.graph)
 
 		for curr_epoch in range(num_epochs):
 			start = time.time()
@@ -168,35 +204,55 @@ def train_neural_network(inputs,targets, seq_len):
 							  targets: train_batches[batch][1],
 							  seq_len: train_batches[batch][2]}
 
-				batch_cost, _ = sess.run([cost, optimizer], train_feed)			#sess.run([optimizer, cost], feed) does not work? works in different code
+				batch_cost, _, summary = sess.run([cost, optimizer, merged], train_feed)			#sess.run([optimizer, cost], feed) does not work? works in different code
 				train_cost += batch_cost
 				train_ler += sess.run(ler, feed_dict = train_feed)
+				train_writer.add_summary(summary, curr_epoch * num_train_batches + batch)
 
 			train_cost /= num_train_batches
 			train_ler /= num_train_batches
-			points_train_cost.append(train_cost)
-			points_train_ler.append(train_ler)
+			#points_train_cost.append(train_cost)
+			#points_train_ler.append(train_ler)
 
 			valid_cost = valid_ler = 0
+			'''
+			##Testing with validation set
 			for batch in range(num_valid_batches):
 				val_feed = {inputs: valid_batches[batch][0],
 							targets: valid_batches[batch][1],
 							seq_len: valid_batches[batch][2]}
 
-				val_cost, val_ler = sess.run([cost, ler], feed_dict = val_feed)
+				val_cost, val_ler, summary = sess.run([cost, ler, merged], feed_dict = val_feed)
 				valid_cost += val_cost
 				valid_ler += val_ler
+				test_writer.add_summary(summary, curr_epoch * num_train_batches + batch)
+			'''
+
+			##Testing with training_batches to see if model is working correctly
+			for batch in range(num_train_batches):
+
+				val_feed = {inputs: train_batches[batch][0],
+							targets: train_batches[batch][1],
+							seq_len: train_batches[batch][2]}
+
+				val_cost, val_ler, summary = sess.run([cost, ler, merged], feed_dict=val_feed)
+
+				valid_cost += val_cost
+				valid_ler += val_ler
+				test_writer.add_summary(summary, curr_epoch * num_train_batches + batch)
 
 			valid_cost /= num_valid_batches
 			valid_ler /= num_valid_batches
-			points_valid_cost.append(valid_cost)
-			points_valid_ler.append(valid_ler)
+
+			#points_valid_cost.append(valid_cost)
+			#points_valid_ler.append(valid_ler)
 
 			log = "Epoch {}/{}, train_cost = {:.3f}, train_ler = {:.3f}, val_cost = {:.3f}, val_ler = {:.3f}, time = {:.3f}"
 			print(log.format(curr_epoch, num_epochs, train_cost, train_ler, val_cost, val_ler, time.time() - start))
 
+			#Saves a model after every number of checkpoint_steps
 			if curr_epoch % checkpoint_steps == 0:
-				saver.save(sess, './checkpoints/model_VA_small.ckpt')
+				saver.save(sess, './VAcheckpoints/model_VA_Aaron_small.ckpt')
 				print('Train decoding: ')
 
 				train_feed = {inputs: train_batches[0][0],
@@ -209,6 +265,8 @@ def train_neural_network(inputs,targets, seq_len):
 
 				print('Validation decoding: ')
 
+				'''
+				#Decoding with Validation set
 				val_feed = {inputs: valid_batches[0][0],
 							targets: valid_batches[0][1],
 							seq_len: valid_batches[0][2]}
@@ -216,7 +274,19 @@ def train_neural_network(inputs,targets, seq_len):
 				valid_original = ' '.join(valid_orig_targets[0])
 				
 				test_decoding(sess, decoded, val_feed, valid_original)
+				'''
 
+				#Decoding the training batch to check if its working
+				randBatch = random.randint(0, len(train_batches)-1)
+				val_feed = {inputs: train_batches[randBatch][0],
+							targets: train_batches[randBatch][1],
+							seq_len: train_batches[randBatch][2]}
+
+				valid_original = ' '.join(train_orig_targets[randBatch])
+
+				test_decoding(sess, decoded, val_feed, valid_original)
+		'''
+		#Show graph with matplot
 		plt.figure(1)
 		plt.subplot(121)
 		plt.plot(range(len(points_train_cost)), points_train_cost, 'b.', linestyle = '-', linewidth=2)
@@ -228,5 +298,6 @@ def train_neural_network(inputs,targets, seq_len):
 		plt.plot(range(len(points_train_ler)), points_valid_ler, 'g.', linestyle = '-', linewidth=2)
 		plt.title('ler')
 		plt.show()
+		'''
 
 train_neural_network(inputs, targets, seq_len)

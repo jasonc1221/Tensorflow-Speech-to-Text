@@ -1,8 +1,22 @@
+'''
+PV-20 #Create preprocessing sound clips 
+Creates training data by extracting the mfcc of data
+The extracted data is then formatted to fit the CTC loss function
+
+batched data = [[batch_size, max_length, 26], batch_targets, batch_seq_len]
+original_targets = [original text of transcript]
+
+Used With California Polythechnic University California, Pomona Voice Assitant Project
+Author: Jason Chang
+Project Manager: Gerry Fernando Patia
+Date: 8 July, 2018
+'''
 import os
 import numpy as np
 import pickle
 import scipy.io.wavfile as wav
 from python_speech_features import mfcc
+from RecordAudioData import recordAudioTest
 
 #Constants
 SPACE_TOKEN = '<space>'
@@ -14,8 +28,11 @@ voxforge_data_dir = './Voxforge'
 #Some configs
 num_features = 26
 
+if not os.path.isdir('./data'):
+	os.makedirs('./data')
+
 def list_files_for_speaker(folder):
-	"""
+	'''
 	Generates a list of wav files from the voxforge dataset.
 	Args:
 		###If want specific speaker
@@ -24,7 +41,7 @@ def list_files_for_speaker(folder):
 		folder: base folder containing the downloaded voxforge data
 
 	Returns: list of paths to the wavfiles
-	"""
+	'''
 	#If you want specific speaker, add speaker arg into function
 	#speaker_folders = [d for d in os.listdir(folder) if speaker in d]
 	speaker_folders = [d for d in os.listdir(folder)]
@@ -38,13 +55,13 @@ def list_files_for_speaker(folder):
 
 
 def sparse_tuple_from(sequences, dtype=np.int32):
-	"""
+	'''
 	Create a sparse representention of x.
 	Args:
 		sequences: a list of lists of type dtype where each element is a sequence
 	Returns:
 		A tuple with (indices, values, shape)
-	"""
+	'''
 	indices = []
 	values = []
 
@@ -60,7 +77,7 @@ def sparse_tuple_from(sequences, dtype=np.int32):
 
 
 def extract_features_and_targets(wav_file, txt_file):
-	"""
+	'''
 	Extract MFCC features from an audio file and target character annotations from
 	a corresponding text transcription
 	Args:
@@ -69,7 +86,7 @@ def extract_features_and_targets(wav_file, txt_file):
 
 	Returns:
 		features, targets, sequence length, original text transcription
-	"""
+	'''
 
 	fs, audio = wav.read(wav_file)
 
@@ -100,7 +117,7 @@ def extract_features_and_targets(wav_file, txt_file):
 
 
 def make_batched_data(wav_files, batch_size=4):
-	"""
+	'''
 	Generate batches of data given a list of wav files from the downloaded Voxforge data.
 	Args:
 		wav_files: list of wav files
@@ -108,7 +125,7 @@ def make_batched_data(wav_files, batch_size=4):
 
 	Returns:
 		batched data, original text transcriptions
-	"""
+	'''
 
 	batched_data = []
 	original_targets = []
@@ -145,18 +162,46 @@ def make_batched_data(wav_files, batch_size=4):
 
 	return batched_data, original_targets
 
+def make_test_data(batch_size=4):
+	'''
+	Generates test data from a recroding
+	Args:
+		wav_files: list of wav files
+		batch_size: batch size
 
+	Returns:
+		test_data
+	'''
+	if not os.path.isdir('./data/test_audio'):
+		os.makedirs('./data/test_audio')
+	fileName = recordAudioTest()
+
+	wav_file = os.path.join('./data/test_audio', fileName)
+	txt_file = './data/test_audio/test_audio_text.txt'
+	features, _, seq_len, _ = extract_features_and_targets(wav_file, txt_file)
+	
+	padded_features = np.zeros(shape=(batch_size, seq_len, num_features), dtype=np.float)
+	padded_features[0, :features.shape[1], :] = features
+
+	#Add padding for seq_len
+	seq_len = [seq_len]
+	for x in range(batch_size-1):
+		seq_len.append(0)
+
+	test_data = [padded_features, seq_len]
+
+	return test_data
+	
 if __name__ == '__main__':
-
+	
 	wav_files = list_files_for_speaker(voxforge_data_dir)
 
 	batched_data, original_targets = make_batched_data(wav_files, batch_size=4)
-	#batched data = [[batch_size, batch_features/max_length, 26], batch_targets, batch_seq_len]
+	#batched data = [[batch_size, max_length, 26], batch_targets, batch_seq_len]
 	#original_targets = [original text of transcript]
 
-	with open('train_data_batched.pkl', 'wb') as f:
+	with open('./data/train_data_batched.pkl', 'wb') as f:
 		pickle.dump(batched_data, f)
 
-	with open('original_targets_batched.pkl', 'wb') as f:
+	with open('./data/original_targets_batched.pkl', 'wb') as f:
 		pickle.dump(original_targets, f)
-
